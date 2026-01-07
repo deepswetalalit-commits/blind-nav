@@ -1,7 +1,6 @@
+
 import { GoogleGenAI, Type } from "@google/genai";
 import { HazardAnalysis } from "../types";
-
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 const HAZARD_SCHEMA = {
   type: Type.OBJECT,
@@ -29,6 +28,20 @@ const HAZARD_SCHEMA = {
 };
 
 export const analyzeSafety = async (base64Image: string): Promise<HazardAnalysis> => {
+  const apiKey = process.env.API_KEY;
+  
+  if (!apiKey) {
+    console.warn("API_KEY is missing in environment variables.");
+    return {
+      detected_hazard: "Configuration Error",
+      urgency: "caution",
+      position: "center",
+      instruction: "System missing API key. Check settings.",
+    };
+  }
+
+  const ai = new GoogleGenAI({ apiKey });
+
   try {
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",

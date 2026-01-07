@@ -1,15 +1,15 @@
+
 import { NavigationStep, RouteData } from "../types";
 
 // Mappls REST API Base URL
 const BASE_URL = "https://apis.mappls.com/advancedmaps/v1";
 
-// Access the Mappls API Key.
-// Note: This requires a separate key from Gemini.
-const MAPPLS_API_KEY = process.env.MAPPLS_API_KEY || process.env.API_KEY; 
-
 export const getWalkingRoute = async (destinationQuery: string): Promise<RouteData> => {
+  // Access key lazily to prevent crash on module load if undefined
+  const MAPPLS_API_KEY = process.env.MAPPLS_API_KEY || process.env.API_KEY; 
+
   if (!MAPPLS_API_KEY) {
-    throw new Error("Mappls API Key is missing. Set MAPPLS_API_KEY.");
+    throw new Error("Mappls API Key is missing. Set MAPPLS_API_KEY or API_KEY.");
   }
 
   if (!navigator.geolocation) {
