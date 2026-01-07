@@ -4,12 +4,44 @@ import { NavigationStep, RouteData } from "../types";
 // Mappls REST API Base URL
 const BASE_URL = "https://apis.mappls.com/advancedmaps/v1";
 
+// Helper to robustly find the API Key across different build environments
+const getMapplsKey = (): string | undefined => {
+  let key: string | undefined = undefined;
+
+  // 1. Try explicit process.env replacements (Webpack, CRA, Next.js)
+  // We use try-catch to prevent ReferenceError if 'process' is not defined in browser
+  try {
+    if (process.env.MAPPLS_API_KEY) key = process.env.MAPPLS_API_KEY;
+    else if (process.env.VITE_MAPPLS_API_KEY) key = process.env.VITE_MAPPLS_API_KEY;
+    else if (process.env.REACT_APP_MAPPLS_API_KEY) key = process.env.REACT_APP_MAPPLS_API_KEY;
+  } catch (e) {}
+
+  if (key) return key;
+
+  // 2. Try import.meta.env (Vite Native)
+  try {
+    const metaEnv = (import.meta as any).env;
+    if (metaEnv) {
+      key = metaEnv.MAPPLS_API_KEY || metaEnv.VITE_MAPPLS_API_KEY || metaEnv.REACT_APP_MAPPLS_API_KEY;
+    }
+  } catch (e) {}
+
+  if (key) return key;
+
+  // 3. Fallback to generic API_KEY if specific Mappls key is missing
+  try {
+    if (process.env.API_KEY) key = process.env.API_KEY;
+    else if (process.env.VITE_API_KEY) key = process.env.VITE_API_KEY;
+  } catch (e) {}
+  
+  return key;
+};
+
 export const getWalkingRoute = async (destinationQuery: string): Promise<RouteData> => {
-  // Access key lazily to prevent crash on module load if undefined
-  const MAPPLS_API_KEY = process.env.MAPPLS_API_KEY || process.env.API_KEY; 
+  const MAPPLS_API_KEY = getMapplsKey();
 
   if (!MAPPLS_API_KEY) {
-    throw new Error("Mappls API Key is missing. Set MAPPLS_API_KEY or API_KEY.");
+    throw new Error("Mappls API Key is missing. Please set MAPPLS_API_KEY or VITE_MAPPLS_API_KEY in your environment variables.");
   }
 
   if (!navigator.geolocation) {
@@ -28,19 +60,16 @@ export const getWalkingRoute = async (destinationQuery: string): Promise<RouteDa
   const startLng = position.coords.longitude;
 
   // 2. Geocode Destination (Address -> Lat/Lng)
-  // https://apis.mappls.com/advancedmaps/v1/<key>/geo_code?addr=<address>
   const geoUrl = `${BASE_URL}/${MAPPLS_API_KEY}/geo_code?addr=${encodeURIComponent(destinationQuery)}`;
   
   const geoRes = await fetch(geoUrl);
   if (!geoRes.ok) {
-    throw new Error("Failed to connect to Mappls Geocoding service");
+    const errorText = await geoRes.text();
+    console.error("Mappls Geocode Error:", geoRes.status, errorText);
+    throw new Error(`Mappls Service Error: ${geoRes.status}`);
   }
   
   const geoData = await geoRes.json();
-  
-  // Mappls response handling for 'copResults'
-  // Sometimes it returns an array 'results', or object 'copResults' depending on API version/license.
-  // Standard v1 REST API usually returns copResults as an object for the best match.
   
   let location: { latitude: number, longitude: number, formattedAddress?: string, poi?: string } | null = null;
 
@@ -51,6 +80,7 @@ export const getWalkingRoute = async (destinationQuery: string): Promise<RouteDa
   }
 
   if (!location) {
+    // Attempt fallback to Atlas Search if available (different endpoint, but sometimes mixed)
     throw new Error(`Could not find location: "${destinationQuery}"`);
   }
 
@@ -59,12 +89,13 @@ export const getWalkingRoute = async (destinationQuery: string): Promise<RouteDa
   const destinationName = location.formattedAddress || location.poi || destinationQuery;
 
   // 3. Get Route (Walking)
-  // https://apis.mappls.com/advancedmaps/v1/<key>/route_adv/walking/<start_lon>,<start_lat>;<end_lon>,<end_lat>
   const routeUrl = `${BASE_URL}/${MAPPLS_API_KEY}/route_adv/walking/${startLng},${startLat};${endLng},${endLat}?steps=true&alternatives=false`;
   
   const routeRes = await fetch(routeUrl);
   if (!routeRes.ok) {
-    throw new Error("Failed to fetch route from Mappls");
+     const errorText = await routeRes.text();
+     console.error("Mappls Route Error:", routeRes.status, errorText);
+     throw new Error("Failed to fetch route from Mappls");
   }
   
   const routeData = await routeRes.json();
@@ -76,12 +107,8 @@ export const getWalkingRoute = async (destinationQuery: string): Promise<RouteDa
   const route = routeData.routes[0];
   const leg = route.legs[0];
 
-  // Map Mappls steps to NavigationStep
   const steps: NavigationStep[] = leg.steps.map((step: any) => {
-    // Instruction text fallback
     let instruction = step.maneuver?.instruction || step.instruction || "Continue";
-    
-    // Clean HTML tags if present
     instruction = instruction.replace(/<[^>]*>?/gm, '');
 
     return {
@@ -91,7 +118,6 @@ export const getWalkingRoute = async (destinationQuery: string): Promise<RouteDa
     };
   });
 
-  // Calculate duration/distance strings
   const durationMin = Math.round(route.duration / 60);
   const durationStr = durationMin > 60 
     ? `${Math.floor(durationMin/60)} hr ${durationMin%60} min` 

@@ -27,11 +27,31 @@ const HAZARD_SCHEMA = {
   required: ["detected_hazard", "urgency", "position", "instruction"],
 };
 
+const getApiKey = () => {
+  // Primary: process.env.API_KEY
+  try {
+    if (process.env.API_KEY) return process.env.API_KEY;
+  } catch (e) {}
+
+  // Secondary: Check for VITE_API_KEY in case user is on Vite
+  try {
+    if (process.env.VITE_API_KEY) return process.env.VITE_API_KEY;
+  } catch (e) {}
+
+  try {
+    const metaEnv = (import.meta as any).env;
+    if (metaEnv && metaEnv.VITE_API_KEY) return metaEnv.VITE_API_KEY;
+    if (metaEnv && metaEnv.API_KEY) return metaEnv.API_KEY;
+  } catch (e) {}
+
+  return undefined;
+};
+
 export const analyzeSafety = async (base64Image: string): Promise<HazardAnalysis> => {
-  const apiKey = process.env.API_KEY;
+  const apiKey = getApiKey();
   
   if (!apiKey) {
-    console.warn("API_KEY is missing in environment variables.");
+    console.warn("API_KEY is missing. Check environment variables.");
     return {
       detected_hazard: "Configuration Error",
       urgency: "caution",

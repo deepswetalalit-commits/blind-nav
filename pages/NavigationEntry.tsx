@@ -223,7 +223,16 @@ const NavigationEntry: React.FC<NavigationEntryProps> = ({ onRouteReady, onCance
     } catch (err: any) {
       console.error(err);
       setAgentState('IDLE');
-      speak("I couldn't find that location. Please try again.");
+      
+      const errMsg = err.message || "";
+      if (errMsg.includes("Key")) {
+        speak("System configuration error. API Key is missing.");
+      } else if (errMsg.includes("No route")) {
+        speak("No walking route found.");
+      } else {
+        speak("I couldn't find that location. Please try again.");
+      }
+      
       vibrate(HAPTIC_PATTERNS.LONG_BUZZ);
     }
   };
