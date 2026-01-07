@@ -1,0 +1,9 @@
+{
+  "name": "BlindNav",
+  "description": "A vision-assisted navigation tool for the visually impaired using Gemini AI.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ]
+}
