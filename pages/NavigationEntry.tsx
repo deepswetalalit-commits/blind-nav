@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { getWalkingRoute } from '../utils/mapplsService';
 import { speak, vibrate } from '../utils/accessibility';
 import { RouteData, HAPTIC_PATTERNS } from '../types';
-import { getSettings } from '../utils/settingsManager';
+import { getSettings, saveCachedRoute, getCachedRoute } from '../utils/settingsManager';
 
 interface NavigationEntryProps {
   onRouteReady: (route: RouteData) => void;
@@ -216,17 +216,38 @@ const NavigationEntry: React.FC<NavigationEntryProps> = ({ onRouteReady, onCance
     vibrate(HAPTIC_PATTERNS.TAP);
 
     try {
+      // Check offline first to save time
+      if (!navigator.onLine) {
+        throw new Error("Offline");
+      }
+
       const route = await getWalkingRoute(term);
+      saveCachedRoute(route); // Save for future offline use
       speak(`Found route to ${route.summary}. Starting guidance.`);
       vibrate(HAPTIC_PATTERNS.DOUBLE_TAP);
       onRouteReady(route);
+
     } catch (err: any) {
       console.error(err);
       setAgentState('IDLE');
       
       const errMsg = err.message || "";
-      if (errMsg.includes("Key")) {
-        speak("System configuration error. API Key is missing.");
+      
+      // Offline / Network Fallback
+      if (errMsg === "Offline" || errMsg.includes("Failed to fetch") || !navigator.onLine) {
+        const cached = getCachedRoute();
+        if (cached) {
+          speak(`Internet unavailable. Loading saved route to ${cached.summary}.`);
+          onRouteReady(cached);
+          return;
+        } else {
+           speak("No internet connection and no saved route found.");
+           return;
+        }
+      }
+
+      if (errMsg.includes("CONFIGURATION ERROR") || errMsg.includes("Key")) {
+        speak("Configuration Error. Please check API Keys.");
       } else if (errMsg.includes("No route")) {
         speak("No walking route found.");
       } else {

@@ -28,20 +28,21 @@ const HAZARD_SCHEMA = {
 };
 
 const getApiKey = () => {
-  // Primary: process.env.API_KEY
-  try {
-    if (process.env.API_KEY) return process.env.API_KEY;
-  } catch (e) {}
-
-  // Secondary: Check for VITE_API_KEY in case user is on Vite
-  try {
-    if (process.env.VITE_API_KEY) return process.env.VITE_API_KEY;
-  } catch (e) {}
-
+  // 1. Check Import Meta (Vite)
   try {
     const metaEnv = (import.meta as any).env;
-    if (metaEnv && metaEnv.VITE_API_KEY) return metaEnv.VITE_API_KEY;
-    if (metaEnv && metaEnv.API_KEY) return metaEnv.API_KEY;
+    if (metaEnv) {
+      if (metaEnv.VITE_API_KEY) return metaEnv.VITE_API_KEY;
+      if (metaEnv.API_KEY) return metaEnv.API_KEY;
+    }
+  } catch (e) {}
+
+  // 2. Check Process Env
+  try {
+    if (typeof process !== 'undefined' && process.env) {
+      if (process.env.VITE_API_KEY) return process.env.VITE_API_KEY;
+      if (process.env.API_KEY) return process.env.API_KEY;
+    }
   } catch (e) {}
 
   return undefined;
@@ -51,12 +52,12 @@ export const analyzeSafety = async (base64Image: string): Promise<HazardAnalysis
   const apiKey = getApiKey();
   
   if (!apiKey) {
-    console.warn("API_KEY is missing. Check environment variables.");
+    console.warn("API_KEY is missing. Please set VITE_API_KEY in environment variables.");
     return {
       detected_hazard: "Configuration Error",
       urgency: "caution",
       position: "center",
-      instruction: "System missing API key. Check settings.",
+      instruction: "Missing VITE_API_KEY in settings.",
     };
   }
 

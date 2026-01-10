@@ -1,3 +1,4 @@
+
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { analyzeSafety } from '../services/geminiService';
 import { speak, vibrate } from '../utils/accessibility';
@@ -14,10 +15,33 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
   const [analysis, setAnalysis] = useState<HazardAnalysis | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const processingTimeoutRef = useRef<number | null>(null);
+  const [isOffline, setIsOffline] = useState(!navigator.onLine);
   
-  // Navigation State
+  const processingTimeoutRef = useRef<number | null>(null);
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
+
+  // Connectivity Listeners
+  useEffect(() => {
+    const handleOffline = () => {
+      setIsOffline(true);
+      speak("Internet connection lost. Hazard detection paused. Please stop.", true);
+      vibrate(HAPTIC_PATTERNS.DANGER_ALARM);
+    };
+
+    const handleOnline = () => {
+      setIsOffline(false);
+      speak("Connection restored. Resuming navigation.", true);
+      vibrate(HAPTIC_PATTERNS.TAP);
+    };
+
+    window.addEventListener('offline', handleOffline);
+    window.addEventListener('online', handleOnline);
+
+    return () => {
+      window.removeEventListener('offline', handleOffline);
+      window.removeEventListener('online', handleOnline);
+    };
+  }, []);
 
   // Initial Startup
   useEffect(() => {
@@ -66,20 +90,35 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
 
   // Analysis Loop
   const captureAndAnalyze = useCallback(async () => {
+    // 1. Safety Checks
     if (!videoRef.current || !canvasRef.current || isProcessing) return;
+
+    // 2. Offline Check - Pause Loop if Offline
+    if (isOffline || !navigator.onLine) {
+      if (!isOffline) setIsOffline(true);
+      // Check again slowly
+      processingTimeoutRef.current = window.setTimeout(captureAndAnalyze, 5000);
+      return;
+    }
 
     setIsProcessing(true);
 
     try {
       const video = videoRef.current;
       const canvas = canvasRef.current;
-      canvas.width = video.videoWidth / 4; 
-      canvas.height = video.videoHeight / 4;
+
+      // 3. Ultra-Light Optimization: Resize to Max Width 320px
+      const MAX_WIDTH = 320;
+      const scale = Math.min(1, MAX_WIDTH / video.videoWidth);
+      canvas.width = video.videoWidth * scale;
+      canvas.height = video.videoHeight * scale;
       
       const ctx = canvas.getContext('2d');
       if (ctx) {
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const base64Image = canvas.toDataURL('image/jpeg', 0.6).split(',')[1];
+        
+        // 4. Low Quality JPEG (0.5) for bandwidth saving
+        const base64Image = canvas.toDataURL('image/jpeg', 0.5).split(',')[1];
         
         const result = await analyzeSafety(base64Image);
         setAnalysis(result);
@@ -89,10 +128,10 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
       console.error("Analysis loop error", err);
     } finally {
       setIsProcessing(false);
-      // Fast loop for responsiveness
+      // 2.5s interval is balanced for battery/data
       processingTimeoutRef.current = window.setTimeout(captureAndAnalyze, 2500);
     }
-  }, [isProcessing]);
+  }, [isProcessing, isOffline]);
 
   // Start loop once video is ready
   useEffect(() => {
@@ -127,8 +166,7 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
 
       speak(`${result.detected_hazard} ${directionText}.`, true);
     } else {
-      // If safe, we can occasionally remind of navigation instruction if active
-      // But don't spam
+      // If safe, silence is golden.
     }
   };
 
@@ -146,12 +184,13 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
     }
   };
 
-  const getStatusColor = (urgency?: string) => {
-    switch (urgency) {
-      case 'danger': return 'bg-red-600 animate-pulse';
-      case 'caution': return 'bg-orange-500';
-      case 'safe': return 'bg-green-600';
-      default: return 'bg-gray-800';
+  const getStatusColor = () => {
+    if (isOffline) return 'bg-gray-900/90';
+    switch (analysis?.urgency) {
+      case 'danger': return 'bg-red-900/80 animate-pulse';
+      case 'caution': return 'bg-orange-800/60';
+      case 'safe': return 'bg-green-900/40';
+      default: return 'bg-black/60';
     }
   };
 
@@ -171,61 +210,92 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
   }
 
   return (
-    <div className="h-screen flex flex-col bg-black relative overflow-hidden">
-      <video ref={videoRef} className="absolute opacity-0 pointer-events-none" autoPlay playsInline muted />
+    <div className="h-screen w-screen relative overflow-hidden bg-black">
+      {/* Camera Feed - Visible Layer */}
+      <video 
+        ref={videoRef} 
+        className="absolute inset-0 w-full h-full object-cover z-0" 
+        autoPlay 
+        playsInline 
+        muted 
+      />
+      
+      {/* Hidden Canvas for Processing */}
       <canvas ref={canvasRef} className="hidden" />
 
-      {/* Navigation Header */}
-      {route && (
-        <div className="bg-yellow-400 p-4 pb-6 z-10 shadow-lg">
-          <p className="text-black text-sm font-bold uppercase tracking-wider mb-1">
-            Navigation • Step {currentStepIndex + 1} of {route.steps.length}
-          </p>
-          <p className="text-black text-2xl font-black leading-tight">
-            {route.steps[currentStepIndex].instruction}
-          </p>
-           <p className="text-black text-lg font-bold mt-1 opacity-75">
-            {route.steps[currentStepIndex].distance}
-          </p>
-        </div>
-      )}
-
-      {/* Main Status Area */}
-      <div className={`flex-1 flex flex-col items-center justify-center p-6 transition-colors duration-500 ${getStatusColor(analysis?.urgency)}`}>
-        <div className="text-center mb-8">
-          <h2 className="text-white text-lg uppercase tracking-widest font-semibold mb-2">Safety Status</h2>
-          <p className="text-black bg-white px-6 py-4 rounded-lg text-4xl font-black uppercase shadow-xl">
-            {analysis?.urgency || "SCANNING..."}
-          </p>
-        </div>
-
-        <div className="text-center">
-          <p className="text-white text-3xl font-bold leading-tight drop-shadow-md">
-            {analysis?.instruction || "Scanning path..."}
-          </p>
-        </div>
-      </div>
-
-      {/* Controls */}
-      <div className="bg-black p-4 border-t-4 border-gray-800 flex gap-4">
-        <button
-          onClick={() => {
-            speak("Ending navigation");
-            onExit();
-          }}
-          className="flex-1 bg-gray-900 text-white border-2 border-gray-700 rounded-xl h-24 text-xl font-bold uppercase tracking-wider active:bg-red-900 transition-colors"
-        >
-          Stop
-        </button>
+      {/* UI Overlay - Semi-Transparent */}
+      <div className="absolute inset-0 z-10 flex flex-col">
         
+        {/* Navigation Header */}
         {route && (
-          <button
-            onClick={nextStep}
-            className="flex-[2] bg-yellow-400 text-black border-2 border-yellow-500 rounded-xl h-24 text-2xl font-black uppercase tracking-wider active:translate-y-1 shadow-[0_4px_0_rgb(202,138,4)] active:shadow-none transition-all"
-          >
-            Next Step
-          </button>
+          <div className="bg-yellow-400/90 p-4 pb-6 shadow-lg backdrop-blur-sm transition-all">
+            <p className="text-black text-sm font-bold uppercase tracking-wider mb-1">
+              Navigation • Step {currentStepIndex + 1} of {route.steps.length}
+            </p>
+            <p className="text-black text-2xl font-black leading-tight">
+              {route.steps[currentStepIndex].instruction}
+            </p>
+             <p className="text-black text-lg font-bold mt-1 opacity-75">
+              {route.steps[currentStepIndex].distance}
+            </p>
+          </div>
         )}
+
+        {/* Offline Banner */}
+        {isOffline && (
+          <div className="bg-red-600 p-3 z-20 animate-pulse">
+             <p className="text-white text-center font-bold text-lg uppercase tracking-widest">
+               OFFLINE MODE - PAUSED
+             </p>
+          </div>
+        )}
+
+        {/* Main Status Area - Tinted Overlay */}
+        <div className={`flex-1 flex flex-col items-center justify-center p-6 transition-colors duration-500 ${getStatusColor()} backdrop-blur-sm`}>
+          <div className="text-center mb-8">
+            <h2 className="text-white text-lg uppercase tracking-widest font-semibold mb-2 drop-shadow-md">Safety Status</h2>
+            <div className="inline-block bg-white/90 px-6 py-4 rounded-lg shadow-xl backdrop-blur-md">
+                <p className="text-black text-4xl font-black uppercase">
+                {isOffline ? "OFFLINE" : (analysis?.urgency || "SCANNING...")}
+                </p>
+            </div>
+          </div>
+
+          <div className="text-center px-4">
+            <p className="text-white text-3xl font-bold leading-tight drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)]">
+               {isOffline 
+                 ? "Connection Lost. Stop." 
+                 : (analysis?.instruction || "Scanning path...")}
+            </p>
+            {analysis?.detected_hazard && analysis.detected_hazard !== "Clear Path" && (
+                <p className="text-gray-200 text-xl mt-4 font-medium drop-shadow-md">
+                    Detected: {analysis.detected_hazard} ({analysis.position})
+                </p>
+            )}
+          </div>
+        </div>
+
+        {/* Controls */}
+        <div className="bg-black/80 p-4 border-t-4 border-gray-800/50 flex gap-4 backdrop-blur-md">
+          <button
+            onClick={() => {
+              speak("Ending navigation");
+              onExit();
+            }}
+            className="flex-1 bg-gray-800/80 text-white border-2 border-gray-600 rounded-xl h-24 text-xl font-bold uppercase tracking-wider active:bg-red-900 transition-colors"
+          >
+            Stop
+          </button>
+          
+          {route && (
+            <button
+              onClick={nextStep}
+              className="flex-[2] bg-yellow-400 text-black border-2 border-yellow-500 rounded-xl h-24 text-2xl font-black uppercase tracking-wider active:translate-y-1 shadow-[0_4px_0_rgb(202,138,4)] active:shadow-none transition-all"
+            >
+              Next Step
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );

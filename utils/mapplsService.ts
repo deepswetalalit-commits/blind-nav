@@ -8,40 +8,42 @@ const BASE_URL = "https://apis.mappls.com/advancedmaps/v1";
 const getMapplsKey = (): string | undefined => {
   let key: string | undefined = undefined;
 
-  // 1. Try explicit process.env replacements (Webpack, CRA, Next.js)
-  // We use try-catch to prevent ReferenceError if 'process' is not defined in browser
-  try {
-    if (process.env.MAPPLS_API_KEY) key = process.env.MAPPLS_API_KEY;
-    else if (process.env.VITE_MAPPLS_API_KEY) key = process.env.VITE_MAPPLS_API_KEY;
-    else if (process.env.REACT_APP_MAPPLS_API_KEY) key = process.env.REACT_APP_MAPPLS_API_KEY;
-  } catch (e) {}
-
-  if (key) return key;
-
-  // 2. Try import.meta.env (Vite Native)
+  // 1. Try Vite-specific import.meta.env (Primary for Vercel + Vite)
   try {
     const metaEnv = (import.meta as any).env;
     if (metaEnv) {
-      key = metaEnv.MAPPLS_API_KEY || metaEnv.VITE_MAPPLS_API_KEY || metaEnv.REACT_APP_MAPPLS_API_KEY;
+      // Check for VITE_ prefixed keys (Standard Vite requirement)
+      if (metaEnv.VITE_MAPPLS_API_KEY) return metaEnv.VITE_MAPPLS_API_KEY;
+      if (metaEnv.VITE_API_KEY) return metaEnv.VITE_API_KEY;
+      
+      // Check legacy/unprefixed (rarely works in Vite client-side unless explicitly configured)
+      if (metaEnv.MAPPLS_API_KEY) return metaEnv.MAPPLS_API_KEY;
     }
   } catch (e) {}
 
-  if (key) return key;
-
-  // 3. Fallback to generic API_KEY if specific Mappls key is missing
+  // 2. Try process.env (Webpack, CRA, or specific Vite replacements)
   try {
-    if (process.env.API_KEY) key = process.env.API_KEY;
-    else if (process.env.VITE_API_KEY) key = process.env.VITE_API_KEY;
+    // Check specific VITE_ prefixed keys in process.env
+    if (typeof process !== 'undefined' && process.env) {
+      if (process.env.VITE_MAPPLS_API_KEY) return process.env.VITE_MAPPLS_API_KEY;
+      if (process.env.MAPPLS_API_KEY) return process.env.MAPPLS_API_KEY;
+      if (process.env.REACT_APP_MAPPLS_API_KEY) return process.env.REACT_APP_MAPPLS_API_KEY;
+      
+      // Fallbacks
+      if (process.env.VITE_API_KEY) return process.env.VITE_API_KEY;
+      if (process.env.API_KEY) return process.env.API_KEY;
+    }
   } catch (e) {}
   
-  return key;
+  return undefined;
 };
 
 export const getWalkingRoute = async (destinationQuery: string): Promise<RouteData> => {
   const MAPPLS_API_KEY = getMapplsKey();
 
   if (!MAPPLS_API_KEY) {
-    throw new Error("Mappls API Key is missing. Please set MAPPLS_API_KEY or VITE_MAPPLS_API_KEY in your environment variables.");
+    console.error("Mappls Key Detection Failed. Checked: VITE_MAPPLS_API_KEY, MAPPLS_API_KEY, VITE_API_KEY, API_KEY");
+    throw new Error("CONFIGURATION ERROR: Missing API Key. If using Vercel/Vite, rename your environment variable to 'VITE_MAPPLS_API_KEY' or 'VITE_API_KEY'.");
   }
 
   if (!navigator.geolocation) {
