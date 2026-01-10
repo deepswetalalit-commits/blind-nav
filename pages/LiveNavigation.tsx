@@ -23,9 +23,13 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
   const processingTimeoutRef = useRef<number | null>(null);
   const recognitionRef = useRef<any>(null);
   
-  // Debouncing & Error handling refs
-  const lastSpokenRef = useRef<{ hazard: string, urgency: string, time: number }>({ hazard: '', urgency: 'safe', time: 0 });
+  // Debouncing & Gyroscope refs
+  const lastSpokenRef = useRef<{ hazard: string, urgency: string, time: number, orientation: {alpha: number, beta: number, gamma: number} | null }>({ hazard: '', urgency: 'safe', time: 0, orientation: null });
+  const currentOrientationRef = useRef<{alpha: number, beta: number, gamma: number} | null>(null);
+  
+  // Error handling refs
   const failureCountRef = useRef(0);
+  const backoffMultiplierRef = useRef(1); // Adaptive speed control
   const MAX_FAILURES_BEFORE_ALERT = 3;
 
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
@@ -42,6 +46,7 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
       setIsOffline(false);
       speak("Connection restored. Resuming navigation.", true);
       vibrate(HAPTIC_PATTERNS.TAP);
+      backoffMultiplierRef.current = 1; // Reset speed
     };
 
     window.addEventListener('offline', handleOffline);
@@ -53,13 +58,49 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
     };
   }, []);
 
+  // Gyroscope / Orientation Listener
+  useEffect(() => {
+    const handleOrientation = (event: DeviceOrientationEvent) => {
+      currentOrientationRef.current = {
+        alpha: event.alpha || 0,
+        beta: event.beta || 0,
+        gamma: event.gamma || 0
+      };
+    };
+
+    // Request permission for iOS 13+
+    const requestAccess = async () => {
+      if (typeof (DeviceOrientationEvent as any).requestPermission === 'function') {
+        try {
+          // Note: This usually requires a user click, so it might fail on auto-load.
+          // We assume standard mobile browser behavior or prior permission.
+          const permission = await (DeviceOrientationEvent as any).requestPermission();
+          if (permission === 'granted') {
+            window.addEventListener('deviceorientation', handleOrientation);
+          }
+        } catch (e) {
+          console.warn("Gyroscope permission denied or error", e);
+        }
+      } else {
+        // Android / Non-iOS
+        window.addEventListener('deviceorientation', handleOrientation);
+      }
+    };
+
+    requestAccess();
+
+    return () => {
+      window.removeEventListener('deviceorientation', handleOrientation);
+    };
+  }, []);
+
   // Voice Command Listener (Continuous)
   useEffect(() => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) return;
 
     const recognition = new SpeechRecognition();
-    recognition.continuous = true; // Keep listening
+    recognition.continuous = true; 
     recognition.interimResults = false;
     recognition.lang = getSettings().language || 'en-US';
     recognitionRef.current = recognition;
@@ -67,11 +108,8 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
     recognition.onresult = async (event: any) => {
       const resultsLength = event.results.length;
       const transcript = event.results[resultsLength - 1][0].transcript.trim();
-      console.log("Heard in Safe Mode:", transcript);
-
-      // Wake Word Logic: Check for "Nav"
-      const match = transcript.match(/^(nav|navigation|now)\s+(.*)/i);
       
+      const match = transcript.match(/^(nav|navigation|now)\s+(.*)/i);
       if (match && match[2]) {
         const userQuery = match[2];
         handleVisualQuery(userQuery);
@@ -79,32 +117,18 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
     };
 
     recognition.onerror = (event: any) => {
-      // Silently restart or ignore errors to keep loop alive
-      if (event.error === 'not-allowed') {
-        console.warn("Mic permission denied");
-      }
+      // Ignore errors to keep alive
     };
 
     recognition.onend = () => {
-      // Auto-restart listening if component is still mounted
       if (videoRef.current) {
-        try {
-          recognition.start();
-        } catch (e) {
-          // Ignore start errors
-        }
+        try { recognition.start(); } catch (e) {}
       }
     };
 
-    try {
-      recognition.start();
-    } catch (e) {
-      console.error("Failed to start voice listener", e);
-    }
+    try { recognition.start(); } catch (e) {}
 
-    return () => {
-      recognition.stop();
-    };
+    return () => { recognition.stop(); };
   }, []);
 
   const handleVisualQuery = async (query: string) => {
@@ -113,13 +137,10 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
     setIsAnsweringQuery(true);
     setQueryText(query);
     vibrate(HAPTIC_PATTERNS.TAP);
-    // Don't speak "Searching" to keep it fluid, just the answer
     
     try {
         const video = videoRef.current;
         const canvas = canvasRef.current;
-        
-        // Use slightly higher quality for specific object detection than safety loop
         const MAX_WIDTH = 500; 
         const scale = Math.min(1, MAX_WIDTH / video.videoWidth);
         canvas.width = video.videoWidth * scale;
@@ -129,25 +150,22 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
         if (ctx) {
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
             const base64Image = canvas.toDataURL('image/jpeg', 0.6).split(',')[1];
-            
             const answer = await queryVisualScene(base64Image, query);
-            
-            speak(answer, true); // interrupt safety warnings for the answer
+            speak(answer, true); 
         }
     } catch (e) {
-        console.error("Query failed", e);
         speak("I couldn't help with that.");
     } finally {
         setTimeout(() => {
             setIsAnsweringQuery(false);
             setQueryText(null);
-        }, 2000); // Visual delay before clearing UI
+        }, 2000);
     }
   };
 
   // Initial Startup
   useEffect(() => {
-    let intro = "Starting Safe Walk Mode. Say 'Nav' then your question to find items.";
+    let intro = "Starting Safe Walk. I will warn you of obstacles.";
     if (route) {
       intro = `Navigation started. ${route.steps[0].instruction}.`;
     }
@@ -159,20 +177,14 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
           video: { facingMode: { exact: "environment" } }, 
           audio: false
         });
-        
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-        }
+        if (videoRef.current) videoRef.current.srcObject = stream;
       } catch (err) {
-        console.warn("Back camera failed, trying any camera", err);
         try {
           const fallbackStream = await navigator.mediaDevices.getUserMedia({ video: true });
-          if (videoRef.current) {
-            videoRef.current.srcObject = fallbackStream;
-          }
+          if (videoRef.current) videoRef.current.srcObject = fallbackStream;
         } catch (fatalErr) {
-          setError("Could not access camera.");
-          speak("Camera error. Navigation cannot start.");
+          setError("Camera access denied.");
+          speak("Camera error. Cannot navigate.");
         }
       }
     };
@@ -184,24 +196,19 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
         const stream = videoRef.current.srcObject as MediaStream;
         stream.getTracks().forEach(track => track.stop());
       }
-      if (processingTimeoutRef.current) {
-        clearTimeout(processingTimeoutRef.current);
-      }
+      if (processingTimeoutRef.current) clearTimeout(processingTimeoutRef.current);
     };
   }, [route]);
 
-  // Analysis Loop (Safety)
+  // Analysis Loop
   const captureAndAnalyze = useCallback(async () => {
-    // 1. Safety Checks
     if (!videoRef.current || !canvasRef.current || isProcessing) return;
 
-    // Pause safety checks while answering a specific query to avoid voice overlap
     if (isAnsweringQuery) {
         processingTimeoutRef.current = window.setTimeout(captureAndAnalyze, 500);
         return;
     }
 
-    // 2. Offline Check
     if (isOffline || !navigator.onLine) {
       if (!isOffline) setIsOffline(true);
       processingTimeoutRef.current = window.setTimeout(captureAndAnalyze, 2000);
@@ -209,13 +216,12 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
     }
 
     setIsProcessing(true);
-    let nextDelay = 500; // Standard delay (walking speed safe)
+    let nextDelay = 500 * backoffMultiplierRef.current; // Adaptive delay
 
     try {
       const video = videoRef.current;
       const canvas = canvasRef.current;
 
-      // 3. Ultra-Light Optimization for Safety Loop
       const MAX_WIDTH = 320;
       const scale = Math.min(1, MAX_WIDTH / video.videoWidth);
       canvas.width = video.videoWidth * scale;
@@ -225,33 +231,37 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
       if (ctx) {
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
         
-        // 4. Low Quality JPEG (0.5)
+        // 0.5 Quality for speed
         const base64Image = canvas.toDataURL('image/jpeg', 0.5).split(',')[1];
         
         const result = await analyzeSafety(base64Image);
         
-        // Check for "Connection Error" response from service
         if (result.detected_hazard === "Connection Error") {
-           throw new Error("Service reported connection error");
+           throw new Error("Service connection error");
         }
 
-        // Success - Reset failure count
+        // Success: Decrease backoff (speed up) if we were slowed down
+        if (backoffMultiplierRef.current > 1) {
+            backoffMultiplierRef.current = Math.max(1, backoffMultiplierRef.current - 0.2);
+        }
         failureCountRef.current = 0;
+        
         setAnalysis(result);
         handleFeedback(result);
       }
     } catch (err) {
-      console.error("Analysis loop error", err);
+      console.error("Analysis error", err);
       failureCountRef.current += 1;
-      nextDelay = 2000; // Backoff on error
-
-      // Only alert user if errors persist (Strike System)
+      
+      // Increase backoff (slow down) to allow connection to recover
+      backoffMultiplierRef.current = Math.min(5, backoffMultiplierRef.current + 0.5);
+      
       if (failureCountRef.current > MAX_FAILURES_BEFORE_ALERT) {
          setAnalysis({
             detected_hazard: "Connection Unstable",
             urgency: "caution",
             position: "center",
-            instruction: "Pausing for a moment..."
+            instruction: "Pausing..."
          });
       }
     } finally {
@@ -260,61 +270,65 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
     }
   }, [isProcessing, isOffline, isAnsweringQuery]);
 
-  // Start loop once video is ready
   useEffect(() => {
-    const handleVideoPlay = () => {
-      captureAndAnalyze();
-    };
-
+    const handleVideoPlay = () => { captureAndAnalyze(); };
     const videoEl = videoRef.current;
-    if (videoEl) {
-      videoEl.addEventListener('play', handleVideoPlay);
-    }
-    
-    return () => {
-      if (videoEl) {
-        videoEl.removeEventListener('play', handleVideoPlay);
-      }
-    };
+    if (videoEl) videoEl.addEventListener('play', handleVideoPlay);
+    return () => { if (videoEl) videoEl.removeEventListener('play', handleVideoPlay); };
   }, [captureAndAnalyze]);
 
   const handleFeedback = (result: HazardAnalysis) => {
-    // Skip feedback if we are answering a specific query
     if (isAnsweringQuery) return;
 
     const now = Date.now();
     const last = lastSpokenRef.current;
-    
-    // Logic: Has the situation changed?
-    // We treat "Car" and "car" as same.
+    const currentOrientation = currentOrientationRef.current;
+
+    // 1. Calculate Rotation Delta (Did the user move their head?)
+    let rotationDelta = 0;
+    if (last.orientation && currentOrientation) {
+        rotationDelta = Math.abs(currentOrientation.alpha - last.orientation.alpha) + 
+                        Math.abs(currentOrientation.beta - last.orientation.beta) +
+                        Math.abs(currentOrientation.gamma - last.orientation.gamma);
+    }
+    // Threshold: ~15 degrees total change implies looking at something else
+    const hasMovedSignificantly = rotationDelta > 15;
+
+    // 2. Logic: Should we speak?
     const isSameHazard = result.detected_hazard.toLowerCase() === last.hazard.toLowerCase();
     const isSameUrgency = result.urgency === last.urgency;
+    const isProximityDanger = result.instruction.includes("Too close");
 
     let shouldSpeak = false;
 
-    if (!isSameHazard || !isSameUrgency) {
-      // Significant change in environment
-      shouldSpeak = true;
-
-      // Anti-spam: If shifting from Safe -> Safe (e.g. "Clear Path" -> "Path Empty"), ignore
-      if (result.urgency === 'safe' && last.urgency === 'safe') {
-        shouldSpeak = false;
-      }
-    } else {
-      // Same environment: only remind if critical
-      if (result.urgency === 'danger' && now - last.time > 3000) {
-        shouldSpeak = true; // Remind danger every 3s
-      } else if (result.urgency === 'caution' && now - last.time > 8000) {
-        shouldSpeak = true; // Remind caution every 8s
-      }
+    // IMMEDIATE OVERRIDE: Proximity Danger
+    if (isProximityDanger) {
+        shouldSpeak = true;
+    } 
+    // New Hazard or Urgency Change
+    else if (!isSameHazard || !isSameUrgency) {
+        shouldSpeak = true;
+        // Anti-spam for safe->safe transitions
+        if (result.urgency === 'safe' && last.urgency === 'safe') shouldSpeak = false;
+    } 
+    // Same Hazard: Only repeat if...
+    else {
+        if (result.urgency === 'danger') {
+            // Repeat danger every 3s OR if user moved significantly (new angle on danger)
+            if ((now - last.time > 3000) || hasMovedSignificantly) shouldSpeak = true;
+        } else if (result.urgency === 'caution') {
+            // Repeat caution only if user moved significantly (looking around) 
+            // OR very long timeout (10s)
+            if (hasMovedSignificantly || (now - last.time > 10000)) shouldSpeak = true;
+        }
     }
 
     if (shouldSpeak) {
       if (result.urgency === 'danger') {
         vibrate(HAPTIC_PATTERNS.DANGER_ALARM);
-        speak(`STOP. ${result.detected_hazard}. ${result.instruction}`, true);
+        speak(`${result.detected_hazard}. ${result.instruction}`, true);
         
-        lastSpokenRef.current = { hazard: result.detected_hazard, urgency: result.urgency, time: now };
+        lastSpokenRef.current = { hazard: result.detected_hazard, urgency: result.urgency, time: now, orientation: currentOrientation };
       
       } else if (result.urgency === 'caution') {
         vibrate(HAPTIC_PATTERNS.LONG_BUZZ);
@@ -326,12 +340,11 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
 
         speak(`${result.detected_hazard} ${directionText}.`, true);
         
-        lastSpokenRef.current = { hazard: result.detected_hazard, urgency: result.urgency, time: now };
+        lastSpokenRef.current = { hazard: result.detected_hazard, urgency: result.urgency, time: now, orientation: currentOrientation };
       
       } else if (result.urgency === 'safe' && last.urgency !== 'safe') {
-        // Only announce safe if we were previously NOT safe
         speak("Path clear.", true);
-        lastSpokenRef.current = { hazard: result.detected_hazard, urgency: result.urgency, time: now };
+        lastSpokenRef.current = { hazard: result.detected_hazard, urgency: result.urgency, time: now, orientation: currentOrientation };
       }
     }
   };
@@ -345,14 +358,14 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
       speak(`Next. ${step.instruction}. For ${step.distance}.`, true);
       vibrate(HAPTIC_PATTERNS.TAP);
     } else {
-      speak("You have arrived at your destination.", true);
+      speak("You have arrived.", true);
       onExit();
     }
   };
 
   const getStatusColor = () => {
     if (isOffline) return 'bg-gray-900/90';
-    if (isAnsweringQuery) return 'bg-blue-900/80'; // Blue for Query Mode
+    if (isAnsweringQuery) return 'bg-blue-900/80'; 
     if (analysis?.detected_hazard === "Connection Unstable") return 'bg-gray-800/80';
 
     switch (analysis?.urgency) {
@@ -380,7 +393,7 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
 
   return (
     <div className="h-screen w-screen relative overflow-hidden bg-black">
-      {/* Camera Feed - Visible Layer */}
+      {/* Camera Feed */}
       <video 
         ref={videoRef} 
         className="absolute inset-0 w-full h-full object-cover z-0" 
@@ -388,14 +401,10 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
         playsInline 
         muted 
       />
-      
-      {/* Hidden Canvas for Processing */}
       <canvas ref={canvasRef} className="hidden" />
 
-      {/* UI Overlay - Semi-Transparent */}
+      {/* UI Overlay */}
       <div className="absolute inset-0 z-10 flex flex-col">
-        
-        {/* Navigation Header */}
         {route && (
           <div className="bg-yellow-400/90 p-4 pb-6 shadow-lg backdrop-blur-sm transition-all">
             <p className="text-black text-sm font-bold uppercase tracking-wider mb-1">
@@ -410,20 +419,16 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
           </div>
         )}
 
-        {/* Offline Banner */}
         {isOffline && (
           <div className="bg-red-600 p-3 z-20 animate-pulse">
-             <p className="text-white text-center font-bold text-lg uppercase tracking-widest">
-               OFFLINE MODE - PAUSED
-             </p>
+             <p className="text-white text-center font-bold text-lg uppercase tracking-widest">OFFLINE</p>
           </div>
         )}
 
-        {/* Main Status Area - Tinted Overlay */}
         <div className={`flex-1 flex flex-col items-center justify-center p-6 transition-colors duration-500 ${getStatusColor()} backdrop-blur-sm`}>
           <div className="text-center mb-8">
             <h2 className="text-white text-lg uppercase tracking-widest font-semibold mb-2 drop-shadow-md">
-                {isAnsweringQuery ? "ASSISTANT" : "Safety Status"}
+                {isAnsweringQuery ? "ASSISTANT" : "Status"}
             </h2>
             <div className="inline-block bg-white/90 px-6 py-4 rounded-lg shadow-xl backdrop-blur-md">
                 <p className="text-black text-4xl font-black uppercase">
@@ -448,13 +453,9 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
           </div>
         </div>
 
-        {/* Controls */}
         <div className="bg-black/80 p-4 border-t-4 border-gray-800/50 flex gap-4 backdrop-blur-md">
           <button
-            onClick={() => {
-              speak("Ending navigation");
-              onExit();
-            }}
+            onClick={() => { speak("Ending navigation"); onExit(); }}
             className="flex-1 bg-gray-800/80 text-white border-2 border-gray-600 rounded-xl h-24 text-xl font-bold uppercase tracking-wider active:bg-red-900 transition-colors"
           >
             Stop
@@ -463,7 +464,7 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
           {route && (
             <button
               onClick={nextStep}
-              className="flex-[2] bg-yellow-400 text-black border-2 border-yellow-500 rounded-xl h-24 text-2xl font-black uppercase tracking-wider active:translate-y-1 shadow-[0_4px_0_rgb(202,138,4)] active:shadow-none transition-all"
+              className="flex-[2] bg-yellow-400 text-black border-2 border-yellow-500 rounded-xl h-24 text-2xl font-black uppercase tracking-wider active:translate-y-1 shadow-[0_4px_0_rgb(202,138,4)] transition-all"
             >
               Next Step
             </button>

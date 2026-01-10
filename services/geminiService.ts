@@ -21,7 +21,7 @@ const HAZARD_SCHEMA = {
     },
     instruction: {
       type: Type.STRING,
-      description: "Short, imperative command for a blind user (e.g., 'Stop', 'Veer left', 'Step up').",
+      description: "Short, imperative command. If object is < 35cm away, say 'STOP IMMEDIATE'.",
     },
   },
   required: ["detected_hazard", "urgency", "position", "instruction"],
@@ -88,9 +88,10 @@ export const analyzeSafety = async (base64Image: string): Promise<HazardAnalysis
           },
           {
             text: `
-              You are a real-time navigation assistant for the visually impaired.
-              Analyze the path immediately. Fast response required.
-              Identify immediate hazards (stairs, cars, poles).
+              CRITICAL SAFETY ANALYSIS:
+              1. If any object covers >70% of the image (approx 30-35cm away), return urgency="danger" and instruction="STOP. Too close.".
+              2. Identify stairs, drop-offs, or head-level obstacles.
+              3. If safe, return urgency="safe".
             `,
           },
         ],
@@ -98,8 +99,8 @@ export const analyzeSafety = async (base64Image: string): Promise<HazardAnalysis
       config: {
         responseMimeType: "application/json",
         responseSchema: HAZARD_SCHEMA,
-        systemInstruction: "Safety is priority. Be concise.",
-        thinkingConfig: { thinkingBudget: 0 } // Zero budget for lowest latency
+        systemInstruction: "You are a guide for a blind person. Prioritize collisions within 1 meter. Be concise.",
+        thinkingConfig: { thinkingBudget: 0 } 
       },
     });
 
@@ -113,7 +114,7 @@ export const analyzeSafety = async (base64Image: string): Promise<HazardAnalysis
     // Fallback for safety
     return {
       detected_hazard: "Connection Error",
-      urgency: "caution", // Don't use danger for connection errors to avoid panic
+      urgency: "caution", 
       position: "center",
       instruction: "Checking connection...",
     };
