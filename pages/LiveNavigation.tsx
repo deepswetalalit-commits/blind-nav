@@ -1,8 +1,9 @@
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { analyzeSafety } from '../services/geminiService';
+import { analyzeSafety, queryVisualScene } from '../services/geminiService';
 import { speak, vibrate } from '../utils/accessibility';
 import { HazardAnalysis, HAPTIC_PATTERNS, RouteData } from '../types';
+import { getSettings } from '../utils/settingsManager';
 
 interface LiveNavigationProps {
   onExit: () => void;
@@ -14,10 +15,13 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [analysis, setAnalysis] = useState<HazardAnalysis | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isAnsweringQuery, setIsAnsweringQuery] = useState(false);
+  const [queryText, setQueryText] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
   
   const processingTimeoutRef = useRef<number | null>(null);
+  const recognitionRef = useRef<any>(null);
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
 
   // Connectivity Listeners
@@ -43,11 +47,103 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
     };
   }, []);
 
+  // Voice Command Listener (Continuous)
+  useEffect(() => {
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) return;
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true; // Keep listening
+    recognition.interimResults = false;
+    recognition.lang = getSettings().language || 'en-US';
+    recognitionRef.current = recognition;
+
+    recognition.onresult = async (event: any) => {
+      const resultsLength = event.results.length;
+      const transcript = event.results[resultsLength - 1][0].transcript.trim();
+      console.log("Heard in Safe Mode:", transcript);
+
+      // Wake Word Logic: Check for "Nav"
+      const match = transcript.match(/^(nav|navigation|now)\s+(.*)/i);
+      
+      if (match && match[2]) {
+        const userQuery = match[2];
+        handleVisualQuery(userQuery);
+      }
+    };
+
+    recognition.onerror = (event: any) => {
+      // Silently restart or ignore errors to keep loop alive
+      if (event.error === 'not-allowed') {
+        console.warn("Mic permission denied");
+      }
+    };
+
+    recognition.onend = () => {
+      // Auto-restart listening if component is still mounted
+      if (videoRef.current) {
+        try {
+          recognition.start();
+        } catch (e) {
+          // Ignore start errors
+        }
+      }
+    };
+
+    try {
+      recognition.start();
+    } catch (e) {
+      console.error("Failed to start voice listener", e);
+    }
+
+    return () => {
+      recognition.stop();
+    };
+  }, []);
+
+  const handleVisualQuery = async (query: string) => {
+    if (isAnsweringQuery || !videoRef.current || !canvasRef.current) return;
+
+    setIsAnsweringQuery(true);
+    setQueryText(query);
+    vibrate(HAPTIC_PATTERNS.TAP);
+    // Don't speak "Searching" to keep it fluid, just the answer
+    
+    try {
+        const video = videoRef.current;
+        const canvas = canvasRef.current;
+        
+        // Use slightly higher quality for specific object detection than safety loop
+        const MAX_WIDTH = 500; 
+        const scale = Math.min(1, MAX_WIDTH / video.videoWidth);
+        canvas.width = video.videoWidth * scale;
+        canvas.height = video.videoHeight * scale;
+        
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const base64Image = canvas.toDataURL('image/jpeg', 0.6).split(',')[1];
+            
+            const answer = await queryVisualScene(base64Image, query);
+            
+            speak(answer, true); // interrupt safety warnings for the answer
+        }
+    } catch (e) {
+        console.error("Query failed", e);
+        speak("I couldn't help with that.");
+    } finally {
+        setTimeout(() => {
+            setIsAnsweringQuery(false);
+            setQueryText(null);
+        }, 2000); // Visual delay before clearing UI
+    }
+  };
+
   // Initial Startup
   useEffect(() => {
-    let intro = "Starting Safe Walk Mode. Hold camera at chest level facing forward.";
+    let intro = "Starting Safe Walk Mode. Say 'Nav' then your question to find items.";
     if (route) {
-      intro = `Navigation started. ${route.steps[0].instruction}. Then, ${route.steps[1]?.instruction || "you will arrive"}.`;
+      intro = `Navigation started. ${route.steps[0].instruction}.`;
     }
     speak(intro, true);
     
@@ -88,16 +184,21 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
     };
   }, [route]);
 
-  // Analysis Loop
+  // Analysis Loop (Safety)
   const captureAndAnalyze = useCallback(async () => {
     // 1. Safety Checks
     if (!videoRef.current || !canvasRef.current || isProcessing) return;
 
-    // 2. Offline Check - Pause Loop if Offline
+    // Pause safety checks while answering a specific query to avoid voice overlap
+    if (isAnsweringQuery) {
+        processingTimeoutRef.current = window.setTimeout(captureAndAnalyze, 500);
+        return;
+    }
+
+    // 2. Offline Check
     if (isOffline || !navigator.onLine) {
       if (!isOffline) setIsOffline(true);
-      // Check again slowly
-      processingTimeoutRef.current = window.setTimeout(captureAndAnalyze, 5000);
+      processingTimeoutRef.current = window.setTimeout(captureAndAnalyze, 2000);
       return;
     }
 
@@ -107,7 +208,7 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
       const video = videoRef.current;
       const canvas = canvasRef.current;
 
-      // 3. Ultra-Light Optimization: Resize to Max Width 320px
+      // 3. Ultra-Light Optimization for Safety Loop
       const MAX_WIDTH = 320;
       const scale = Math.min(1, MAX_WIDTH / video.videoWidth);
       canvas.width = video.videoWidth * scale;
@@ -117,7 +218,7 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
       if (ctx) {
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
         
-        // 4. Low Quality JPEG (0.5) for bandwidth saving
+        // 4. Low Quality JPEG (0.5)
         const base64Image = canvas.toDataURL('image/jpeg', 0.5).split(',')[1];
         
         const result = await analyzeSafety(base64Image);
@@ -128,10 +229,10 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
       console.error("Analysis loop error", err);
     } finally {
       setIsProcessing(false);
-      // 2.5s interval is balanced for battery/data
-      processingTimeoutRef.current = window.setTimeout(captureAndAnalyze, 2500);
+      // Real-time: Run immediately
+      processingTimeoutRef.current = window.setTimeout(captureAndAnalyze, 50);
     }
-  }, [isProcessing, isOffline]);
+  }, [isProcessing, isOffline, isAnsweringQuery]);
 
   // Start loop once video is ready
   useEffect(() => {
@@ -152,6 +253,9 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
   }, [captureAndAnalyze]);
 
   const handleFeedback = (result: HazardAnalysis) => {
+    // Skip feedback if we are answering a specific query
+    if (isAnsweringQuery) return;
+
     // Priority: Danger > Navigation > Caution > Safe
     if (result.urgency === 'danger') {
       vibrate(HAPTIC_PATTERNS.DANGER_ALARM);
@@ -165,8 +269,6 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
       if (result.position === 'center') directionText = "ahead";
 
       speak(`${result.detected_hazard} ${directionText}.`, true);
-    } else {
-      // If safe, silence is golden.
     }
   };
 
@@ -186,6 +288,7 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
 
   const getStatusColor = () => {
     if (isOffline) return 'bg-gray-900/90';
+    if (isAnsweringQuery) return 'bg-blue-900/80'; // Blue for Query Mode
     switch (analysis?.urgency) {
       case 'danger': return 'bg-red-900/80 animate-pulse';
       case 'caution': return 'bg-orange-800/60';
@@ -253,21 +356,25 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
         {/* Main Status Area - Tinted Overlay */}
         <div className={`flex-1 flex flex-col items-center justify-center p-6 transition-colors duration-500 ${getStatusColor()} backdrop-blur-sm`}>
           <div className="text-center mb-8">
-            <h2 className="text-white text-lg uppercase tracking-widest font-semibold mb-2 drop-shadow-md">Safety Status</h2>
+            <h2 className="text-white text-lg uppercase tracking-widest font-semibold mb-2 drop-shadow-md">
+                {isAnsweringQuery ? "ASSISTANT" : "Safety Status"}
+            </h2>
             <div className="inline-block bg-white/90 px-6 py-4 rounded-lg shadow-xl backdrop-blur-md">
                 <p className="text-black text-4xl font-black uppercase">
-                {isOffline ? "OFFLINE" : (analysis?.urgency || "SCANNING...")}
+                {isOffline ? "OFFLINE" : isAnsweringQuery ? "ANALYZING..." : (analysis?.urgency || "SCANNING...")}
                 </p>
             </div>
           </div>
 
           <div className="text-center px-4">
             <p className="text-white text-3xl font-bold leading-tight drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)]">
-               {isOffline 
-                 ? "Connection Lost. Stop." 
-                 : (analysis?.instruction || "Scanning path...")}
+               {isAnsweringQuery 
+                  ? `Checking: "${queryText}"`
+                  : isOffline 
+                    ? "Connection Lost. Stop." 
+                    : (analysis?.instruction || "Scanning path...")}
             </p>
-            {analysis?.detected_hazard && analysis.detected_hazard !== "Clear Path" && (
+            {!isAnsweringQuery && analysis?.detected_hazard && analysis.detected_hazard !== "Clear Path" && (
                 <p className="text-gray-200 text-xl mt-4 font-medium drop-shadow-md">
                     Detected: {analysis.detected_hazard} ({analysis.position})
                 </p>

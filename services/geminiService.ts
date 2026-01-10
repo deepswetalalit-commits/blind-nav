@@ -48,6 +48,7 @@ const getApiKey = () => {
   return undefined;
 };
 
+// Standard Safety Analysis (JSON)
 export const analyzeSafety = async (base64Image: string): Promise<HazardAnalysis> => {
   const apiKey = getApiKey();
   
@@ -76,12 +77,9 @@ export const analyzeSafety = async (base64Image: string): Promise<HazardAnalysis
           },
           {
             text: `
-              You are a navigation assistant for a visually impaired person. 
-              Analyze the image from their chest-mounted camera.
-              Focus ONLY on the immediate path ahead (ground level and head height).
-              Identify hazards like stairs, poles, people, cars, or walls.
-              If the path is clear, urgency is 'safe'.
-              If there is an obstacle, determine if it requires a stop (danger) or a slight turn (caution).
+              You are a real-time navigation assistant for the visually impaired.
+              Analyze the path immediately. Fast response required.
+              Identify immediate hazards (stairs, cars, poles).
             `,
           },
         ],
@@ -89,7 +87,8 @@ export const analyzeSafety = async (base64Image: string): Promise<HazardAnalysis
       config: {
         responseMimeType: "application/json",
         responseSchema: HAZARD_SCHEMA,
-        systemInstruction: "You are a safety guide. Be conservative. Safety is priority #1.",
+        systemInstruction: "Safety is priority. Be concise.",
+        thinkingConfig: { thinkingBudget: 0 } // Zero budget for lowest latency
       },
     });
 
@@ -107,5 +106,41 @@ export const analyzeSafety = async (base64Image: string): Promise<HazardAnalysis
       position: "center",
       instruction: "Stop and check connection",
     };
+  }
+};
+
+// Visual Query Assistant (Free-form Text)
+export const queryVisualScene = async (base64Image: string, userQuery: string): Promise<string> => {
+  const apiKey = getApiKey();
+  if (!apiKey) return "Configuration Error: API Key missing.";
+
+  const ai = new GoogleGenAI({ apiKey });
+
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: {
+        parts: [
+          {
+            inlineData: {
+              mimeType: "image/jpeg",
+              data: base64Image,
+            },
+          },
+          {
+            text: `User Question: "${userQuery}". Answer concisely for a blind user. Locate items relative to the user (e.g. 'on your left').`,
+          },
+        ],
+      },
+      config: {
+        systemInstruction: "You are a helpful visual assistant. Keep answers under 15 words. Be direct.",
+        thinkingConfig: { thinkingBudget: 0 }
+      },
+    });
+
+    return response.text || "I couldn't see that clearly.";
+  } catch (error) {
+    console.error("Visual Query failed:", error);
+    return "I had trouble seeing that.";
   }
 };
