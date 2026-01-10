@@ -22,6 +22,12 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
   
   const processingTimeoutRef = useRef<number | null>(null);
   const recognitionRef = useRef<any>(null);
+  
+  // Debouncing & Error handling refs
+  const lastSpokenRef = useRef<{ hazard: string, urgency: string, time: number }>({ hazard: '', urgency: 'safe', time: 0 });
+  const failureCountRef = useRef(0);
+  const MAX_FAILURES_BEFORE_ALERT = 3;
+
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
 
   // Connectivity Listeners
@@ -203,6 +209,7 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
     }
 
     setIsProcessing(true);
+    let nextDelay = 500; // Standard delay (walking speed safe)
 
     try {
       const video = videoRef.current;
@@ -222,15 +229,34 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
         const base64Image = canvas.toDataURL('image/jpeg', 0.5).split(',')[1];
         
         const result = await analyzeSafety(base64Image);
+        
+        // Check for "Connection Error" response from service
+        if (result.detected_hazard === "Connection Error") {
+           throw new Error("Service reported connection error");
+        }
+
+        // Success - Reset failure count
+        failureCountRef.current = 0;
         setAnalysis(result);
         handleFeedback(result);
       }
     } catch (err) {
       console.error("Analysis loop error", err);
+      failureCountRef.current += 1;
+      nextDelay = 2000; // Backoff on error
+
+      // Only alert user if errors persist (Strike System)
+      if (failureCountRef.current > MAX_FAILURES_BEFORE_ALERT) {
+         setAnalysis({
+            detected_hazard: "Connection Unstable",
+            urgency: "caution",
+            position: "center",
+            instruction: "Pausing for a moment..."
+         });
+      }
     } finally {
       setIsProcessing(false);
-      // Real-time: Run immediately
-      processingTimeoutRef.current = window.setTimeout(captureAndAnalyze, 50);
+      processingTimeoutRef.current = window.setTimeout(captureAndAnalyze, nextDelay);
     }
   }, [isProcessing, isOffline, isAnsweringQuery]);
 
@@ -256,19 +282,57 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
     // Skip feedback if we are answering a specific query
     if (isAnsweringQuery) return;
 
-    // Priority: Danger > Navigation > Caution > Safe
-    if (result.urgency === 'danger') {
-      vibrate(HAPTIC_PATTERNS.DANGER_ALARM);
-      speak(`STOP. ${result.detected_hazard}. ${result.instruction}`, true);
-    } else if (result.urgency === 'caution') {
-      vibrate(HAPTIC_PATTERNS.LONG_BUZZ);
-      
-      let directionText = "";
-      if (result.position === 'left') directionText = "on your left";
-      if (result.position === 'right') directionText = "on your right";
-      if (result.position === 'center') directionText = "ahead";
+    const now = Date.now();
+    const last = lastSpokenRef.current;
+    
+    // Logic: Has the situation changed?
+    // We treat "Car" and "car" as same.
+    const isSameHazard = result.detected_hazard.toLowerCase() === last.hazard.toLowerCase();
+    const isSameUrgency = result.urgency === last.urgency;
 
-      speak(`${result.detected_hazard} ${directionText}.`, true);
+    let shouldSpeak = false;
+
+    if (!isSameHazard || !isSameUrgency) {
+      // Significant change in environment
+      shouldSpeak = true;
+
+      // Anti-spam: If shifting from Safe -> Safe (e.g. "Clear Path" -> "Path Empty"), ignore
+      if (result.urgency === 'safe' && last.urgency === 'safe') {
+        shouldSpeak = false;
+      }
+    } else {
+      // Same environment: only remind if critical
+      if (result.urgency === 'danger' && now - last.time > 3000) {
+        shouldSpeak = true; // Remind danger every 3s
+      } else if (result.urgency === 'caution' && now - last.time > 8000) {
+        shouldSpeak = true; // Remind caution every 8s
+      }
+    }
+
+    if (shouldSpeak) {
+      if (result.urgency === 'danger') {
+        vibrate(HAPTIC_PATTERNS.DANGER_ALARM);
+        speak(`STOP. ${result.detected_hazard}. ${result.instruction}`, true);
+        
+        lastSpokenRef.current = { hazard: result.detected_hazard, urgency: result.urgency, time: now };
+      
+      } else if (result.urgency === 'caution') {
+        vibrate(HAPTIC_PATTERNS.LONG_BUZZ);
+        
+        let directionText = "";
+        if (result.position === 'left') directionText = "on your left";
+        if (result.position === 'right') directionText = "on your right";
+        if (result.position === 'center') directionText = "ahead";
+
+        speak(`${result.detected_hazard} ${directionText}.`, true);
+        
+        lastSpokenRef.current = { hazard: result.detected_hazard, urgency: result.urgency, time: now };
+      
+      } else if (result.urgency === 'safe' && last.urgency !== 'safe') {
+        // Only announce safe if we were previously NOT safe
+        speak("Path clear.", true);
+        lastSpokenRef.current = { hazard: result.detected_hazard, urgency: result.urgency, time: now };
+      }
     }
   };
 
@@ -289,6 +353,8 @@ const LiveNavigation: React.FC<LiveNavigationProps> = ({ onExit, route }) => {
   const getStatusColor = () => {
     if (isOffline) return 'bg-gray-900/90';
     if (isAnsweringQuery) return 'bg-blue-900/80'; // Blue for Query Mode
+    if (analysis?.detected_hazard === "Connection Unstable") return 'bg-gray-800/80';
+
     switch (analysis?.urgency) {
       case 'danger': return 'bg-red-900/80 animate-pulse';
       case 'caution': return 'bg-orange-800/60';

@@ -48,11 +48,24 @@ const getApiKey = () => {
   return undefined;
 };
 
+// Singleton Client
+let aiClient: GoogleGenAI | null = null;
+
+const getAiClient = () => {
+  if (aiClient) return aiClient;
+  
+  const apiKey = getApiKey();
+  if (!apiKey) return null;
+  
+  aiClient = new GoogleGenAI({ apiKey });
+  return aiClient;
+};
+
 // Standard Safety Analysis (JSON)
 export const analyzeSafety = async (base64Image: string): Promise<HazardAnalysis> => {
-  const apiKey = getApiKey();
+  const ai = getAiClient();
   
-  if (!apiKey) {
+  if (!ai) {
     console.warn("API_KEY is missing. Please set VITE_API_KEY in environment variables.");
     return {
       detected_hazard: "Configuration Error",
@@ -61,8 +74,6 @@ export const analyzeSafety = async (base64Image: string): Promise<HazardAnalysis
       instruction: "Missing VITE_API_KEY in settings.",
     };
   }
-
-  const ai = new GoogleGenAI({ apiKey });
 
   try {
     const response = await ai.models.generateContent({
@@ -102,19 +113,17 @@ export const analyzeSafety = async (base64Image: string): Promise<HazardAnalysis
     // Fallback for safety
     return {
       detected_hazard: "Connection Error",
-      urgency: "caution",
+      urgency: "caution", // Don't use danger for connection errors to avoid panic
       position: "center",
-      instruction: "Stop and check connection",
+      instruction: "Checking connection...",
     };
   }
 };
 
 // Visual Query Assistant (Free-form Text)
 export const queryVisualScene = async (base64Image: string, userQuery: string): Promise<string> => {
-  const apiKey = getApiKey();
-  if (!apiKey) return "Configuration Error: API Key missing.";
-
-  const ai = new GoogleGenAI({ apiKey });
+  const ai = getAiClient();
+  if (!ai) return "Configuration Error: API Key missing.";
 
   try {
     const response = await ai.models.generateContent({
