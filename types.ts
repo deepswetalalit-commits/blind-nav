@@ -2,8 +2,6 @@
 export enum NavigationMode {
   IDLE = 'IDLE',
   SAFE_WALK = 'SAFE_WALK',
-  NAVIGATION_ENTRY = 'NAVIGATION_ENTRY',
-  NAVIGATING = 'NAVIGATING',
   SETTINGS = 'SETTINGS'
 }
 
@@ -12,19 +10,6 @@ export interface HazardAnalysis {
   urgency: 'safe' | 'caution' | 'danger';
   position: 'left' | 'center' | 'right' | 'none';
   instruction: string;
-}
-
-export interface NavigationStep {
-  instruction: string; // HTML string from Google Maps
-  distance: string;
-  maneuver?: string; // e.g., 'turn-left'
-}
-
-export interface RouteData {
-  summary: string;
-  duration: string;
-  distance: string;
-  steps: NavigationStep[];
 }
 
 export interface UserSettings {
